@@ -109,13 +109,10 @@ function queryString(filters: DashboardFilters) {
 
 async function request<T>(path: string): Promise<T> {
   const response = await fetch(endpoint(path));
-  const body = (await response.json()) as ApiEnvelope<T> | { error?: { message?: string } };
+  const body = await parseResponse<T>(response);
 
   if (!response.ok) {
-    const message =
-      "error" in body && body.error?.message
-        ? body.error.message
-        : `Request failed with status ${response.status}`;
+    const message = getErrorMessage(body, response.status);
     throw new Error(message);
   }
 
@@ -124,17 +121,34 @@ async function request<T>(path: string): Promise<T> {
 
 async function post<T>(path: string): Promise<T> {
   const response = await fetch(endpoint(path), { method: "POST" });
-  const body = (await response.json()) as ApiEnvelope<T> | { error?: { message?: string } };
+  const body = await parseResponse<T>(response);
 
   if (!response.ok) {
-    const message =
-      "error" in body && body.error?.message
-        ? body.error.message
-        : `Request failed with status ${response.status}`;
+    const message = getErrorMessage(body, response.status);
     throw new Error(message);
   }
 
   return (body as ApiEnvelope<T>).data;
+}
+
+async function parseResponse<T>(response: Response) {
+  const contentType = response.headers.get("content-type") ?? "";
+
+  if (contentType.includes("application/json")) {
+    return (await response.json()) as ApiEnvelope<T> | { error?: { message?: string } };
+  }
+
+  return {
+    error: {
+      message: `Request failed with status ${response.status}: ${await response.text()}`
+    }
+  };
+}
+
+function getErrorMessage(body: ApiEnvelope<unknown> | { error?: { message?: string } }, status: number) {
+  return "error" in body && body.error?.message
+    ? body.error.message
+    : `Request failed with status ${status}`;
 }
 
 function hours(seconds: number) {
@@ -245,8 +259,8 @@ export async function fetchDashboardData(filters: DashboardFilters = {}): Promis
     await Promise.all([
       request<BootstrapPayload>("/bootstrap"),
       request<BackendFactoryMetrics>(`/metrics/factory${suffix}`),
-      request<BackendWorkerMetric[]>(`/metrics/workers${suffix}`),
-      request<BackendWorkstationMetric[]>(`/metrics/workstations${suffix}`),
+      request<BackendWorkerMetric[]>(`/metrics/workers/${suffix}`),
+      request<BackendWorkstationMetric[]>(`/metrics/workstations/${suffix}`),
       request<BackendEvent[]>(`/events${eventSuffix}`)
     ]);
 
