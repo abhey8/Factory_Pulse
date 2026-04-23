@@ -4,6 +4,23 @@ FactoryPulse AI is a full-stack manufacturing productivity dashboard for AI-powe
 
 The backend is the source of truth. The frontend consumes live backend APIs for factory, worker, workstation, and event data.
 
+## Assignment README Checklist
+
+This README directly addresses the required written sections:
+
+| Requirement | Where to read |
+| --- | --- |
+| Edge -> Backend -> Dashboard architecture | [Architecture Overview](#architecture-overview) |
+| Database schema | [Database Schema and Duplicate Strategy](#database-schema-and-duplicate-strategy) |
+| Metric definitions | [Metric Definitions](#metric-definitions) |
+| Assumptions and tradeoffs | [Assumptions and Tradeoffs](#assumptions-and-tradeoffs) |
+| Intermittent connectivity | [Real-World Event Handling](#real-world-event-handling) |
+| Duplicate events | [Real-World Event Handling](#real-world-event-handling) |
+| Out-of-order timestamps | [Real-World Event Handling](#real-world-event-handling) |
+| Model versioning, drift, retraining | [Model Lifecycle Extension Answers](#model-lifecycle-extension-answers) |
+| Scaling from 5 cameras to 100+ cameras to multi-site | [Scaling Plan](#scaling-plan) |
+| GitHub repository and web application | [Deliverables](#deliverables) |
+
 ## Features
 
 - Single and batch event ingestion with Zod validation.
@@ -42,7 +59,13 @@ The backend is the source of truth. The frontend consumes live backend APIs for 
 
 ![Build passing](./docs/screenshots/build-passing.png)
 
-## Architecture
+## Deliverables
+
+- GitHub repository: `https://github.com/abhey8/Factory_Pulse`
+- Web application: `https://factory-pulse-2.onrender.com/`
+- API docs: `https://factory-pulse-2.onrender.com/docs/`
+
+## Architecture Overview
 
 ```mermaid
 flowchart LR
@@ -55,6 +78,14 @@ flowchart LR
   G --> H["React Dashboard"]
   G --> I["Swagger Docs"]
 ```
+
+Flow:
+
+1. **Edge/CCTV layer** emits structured JSON events with worker, station, event type, timestamp, confidence, and optional production count.
+2. **Backend ingestion API** validates payloads, checks worker/station references, computes duplicate fingerprints, and persists accepted events.
+3. **MongoDB** stores workers, workstations, and raw AI events.
+4. **Metrics engine** sorts events by timestamp and computes worker, workstation, and factory metrics.
+5. **Dashboard/API layer** exposes metrics through REST endpoints, Swagger docs, and the React dashboard.
 
 ```mermaid
 classDiagram
@@ -135,7 +166,7 @@ Key files:
 - `frontend/src/app/services/api.ts`: central frontend API client.
 - `src/docs/openapi.ts`: Swagger/OpenAPI document.
 
-## Data Model and Duplicate Strategy
+## Database Schema and Duplicate Strategy
 
 Collections:
 
@@ -151,7 +182,7 @@ normalized timestamp | worker_id | workstation_id | event_type | count
 
 This prevents retry submissions from double-counting production. `confidence` is excluded because the same source event may be resent with a slightly different confidence score.
 
-## Metric Rules
+## Metric Definitions
 
 All duration calculations use event timestamps, not insertion order.
 
@@ -169,6 +200,23 @@ Definitions:
 - Workstation throughput: `total_units_produced / tracked_hours`.
 - Factory productive time: sum of worker active time.
 - Factory production count: sum of all production counts.
+
+## Assumptions and Tradeoffs
+
+Assumptions:
+
+- The AI/CCTV system emits structured events; this app does not run computer vision itself.
+- `working`, `idle`, and `absent` are state transitions, not durations.
+- `product_count` is an increment event and does not create active time.
+- Final open intervals close at the explicit `to` filter when supplied, otherwise at the max timestamp in the filtered dataset.
+- Seed data is deterministic so evaluators see repeatable metrics on first run.
+
+Tradeoffs:
+
+- No authentication or authorization because the assignment focuses on ingestion, metrics, and dashboard integration.
+- No queue/streaming layer yet; direct HTTP ingestion is enough for the assessment scope.
+- No background aggregation jobs; metrics are computed from persisted events for clarity.
+- No model registry implementation yet; model lifecycle support is documented below as an extension path.
 
 ## API Overview
 
@@ -324,23 +372,44 @@ curl -X POST http://localhost:3000/api/events/ingest \
   }'
 ```
 
-## Real-World Handling
+## Real-World Event Handling
 
-- Intermittent connectivity: delayed batches are accepted; late timestamps are not rejected.
-- Duplicate events: deterministic fingerprints prevent double-counting.
-- Out-of-order timestamps: events are stored as received, but metrics sort by `occurredAt`.
+### Intermittent Connectivity
 
-## Extension Notes
+Cameras or edge devices may temporarily lose connectivity. The ingestion endpoint accepts batches, so a device can buffer events locally and send them later. The backend does not reject late timestamps.
 
-- Model versioning: add `model_version`, `camera_id`, `site_id`, and optional `pipeline_version` to events.
-- Drift detection: monitor confidence distributions, event rates, production mismatches, and camera/model anomalies.
-- Retraining: trigger from drift alerts, manual audit failures, layout changes, new product types, or confidence degradation.
-- Scaling: add queue-backed ingestion, site/camera partitioning, precomputed aggregates, and site-aware authorization.
+### Duplicate Events
 
-## Tradeoffs
+Retries are safe because each event receives a deterministic fingerprint from timestamp, worker, workstation, event type, and count. If the same event is sent again, it is reported as a duplicate and not inserted again.
 
-- No authentication or authorization.
-- No queue/streaming layer.
-- No background aggregation jobs.
-- No model registry implementation.
-- Metrics are computed directly from persisted events for clarity in this assessment.
+### Out-of-Order Timestamps
+
+Events are persisted even if they arrive late or out of order. Metrics sort by `occurredAt`, not insertion order, before calculating state durations.
+
+## Model Lifecycle Extension Answers
+
+### Add Model Versioning
+
+Add fields such as `model_version`, `camera_id`, `site_id`, and optional `pipeline_version` to `AIEvent`. For a larger system, add a `ModelVersion` collection with training date, dataset notes, evaluation metrics, and deployment status.
+
+### Detect Model Drift
+
+Monitor confidence distributions, event frequency by camera, worker state mix, sudden station-level changes, and production count mismatch against trusted manual/ERP totals. Drift alerts can be generated by comparing these signals against rolling baselines.
+
+### Trigger Retraining
+
+Retraining should be triggered by evidence: drift alerts, repeated manual audit failures, layout/camera changes, new product types, or sustained confidence degradation. A practical loop would collect reviewed examples, retrain a candidate model, evaluate it against held-out shifts, then roll it out gradually.
+
+## Scaling Plan
+
+### 5 Cameras
+
+The current direct HTTP ingestion API is sufficient. Add camera IDs, basic auth, request logging, and monitoring.
+
+### 100+ Cameras
+
+Add a queue or streaming layer between cameras and the API, such as Kafka, RabbitMQ, SQS, or a durable edge gateway. Add backpressure, dead-letter handling, stronger timestamp/camera/site indexes, and precomputed hourly or shift aggregates.
+
+### Multi-Site
+
+Add `site_id` across workers, workstations, cameras, and events. Add site-aware authorization, site time zones, shift definitions, regional ingestion gateways, and per-site aggregation/reporting.
